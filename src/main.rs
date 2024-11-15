@@ -3,7 +3,7 @@ use std::io::stdout;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crossterm::cursor::MoveTo;
+use crossterm::cursor::{self, MoveTo};
 use crossterm::event::{read, Event, KeyCode};
 use crossterm::execute;
 use crossterm::style::{Print, Stylize};
@@ -17,23 +17,39 @@ use rand::random;
 
 fn main() {
     let g = Game::new();
-    execute!(stdout(), EnterAlternateScreen);
+    execute!(stdout(), EnterAlternateScreen, cursor::Hide);
     enable_raw_mode();
-
     g.render_board();
     let game = game_loop(
         g,
-        2,
-        2.0,
+        4,
+        0.16,
         |g| {
+            let mut inputQueue = Vec::<Direction>::new();
             while let Ok(input) = g.game.input.try_recv() {
-                if let Ok(direction) = input.try_into() {
-                    g.game.direction = direction;
+                if let Ok(direction) = Direction::try_from(input) {
+                    inputQueue.push(direction.clone());
+                    match direction {
+                        Direction::Up if !matches!(g.game.direction, Direction::Down) => {
+                            g.game.direction = direction
+                        }
+                        Direction::Down if !matches!(g.game.direction, Direction::Up) => {
+                            g.game.direction = direction
+                        }
+                        Direction::Right if !matches!(g.game.direction, Direction::Left) => {
+                            g.game.direction = direction
+                        }
+                        Direction::Left if !matches!(g.game.direction, Direction::Right) => {
+                            g.game.direction = direction
+                        }
+                        _ => {}
+                    };
                 } else {
                     g.exit();
                 }
             }
-            if let Err(gg) = g.game.update() {
+            let update_step = g.game.get_step(&mut inputQueue);
+            if let Err(gg) = g.game.update(update_step) {
                 g.exit();
             }
         },
@@ -42,7 +58,7 @@ fn main() {
         },
     );
     disable_raw_mode();
-    execute!(stdout(), LeaveAlternateScreen);
+    execute!(stdout(), LeaveAlternateScreen, cursor::Show);
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +86,15 @@ enum Input {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum Step {
+    Turn(Direction),
+    MoveAndTurn {
+        step_direction: Direction,
+        new_direction: Direction,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
 enum GameOverState {
     SnakeBite,
     OutOfBounds,
@@ -90,6 +115,18 @@ impl TryFrom<Input> for Direction {
             Input::Down => Ok(Direction::Down),
             Input::Left => Ok(Direction::Left),
             Input::Exit => Err(Self::Error::Exit),
+        }
+    }
+}
+
+impl Direction {
+    fn valid_direction(cur_direction: &Direction, new_direction: &Direction) -> bool {
+        match new_direction {
+            Direction::Up if matches!(cur_direction, Direction::Down) => false,
+            Direction::Down if matches!(cur_direction, Direction::Up) => false,
+            Direction::Right if matches!(cur_direction, Direction::Left) => false,
+            Direction::Left if matches!(cur_direction, Direction::Right) => false,
+            _ => true,
         }
     }
 }
@@ -156,7 +193,22 @@ impl Game {
         }
     }
 
-    fn update(&mut self) -> Result<(), GameOverState> {
+    fn get_step(&self, input: &Vec<Direction>) -> Step {
+        match input.len() {
+            1 if Direction::valid_direction(&self.direction, &input[0]) => Step::Turn(input[0]),
+            2.. if Direction::valid_direction(&self.direction, &input[input.len() - 2])
+                && Direction::valid_direction(&input[input.len() - 2], &input[input.len() - 1]) =>
+            {
+                Step::MoveAndTurn {
+                    step_direction: input[input.len() - 2],
+                    new_direction: input[input.len() - 1],
+                }
+            }
+            _ => Step::Turn(self.direction),
+        }
+    }
+
+    fn advance(&mut self) -> Result<(), GameOverState> {
         let next_pos = self.next_pos()?;
 
         match self.check_pos(next_pos)? {
@@ -170,6 +222,25 @@ impl Game {
         }
         self.snake.push_back(next_pos);
 
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        Ok(())
+    }
+
+    fn update(&mut self, step: Step) -> Result<(), GameOverState> {
+        match step {
+            Step::Turn(direction) => {
+                self.direction = direction;
+                self.advance()?;
+            }
+            Step::MoveAndTurn {
+                step_direction,
+                new_direction,
+            } => {
+                self.direction = step_direction;
+                self.advance()?;
+                self.direction = new_direction;
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(250));
         Ok(())
     }
